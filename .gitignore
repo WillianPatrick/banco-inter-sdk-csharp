@@ -1,0 +1,9 @@
+﻿################################################################################
+# Este arquivo .gitignore foi criado automaticamente pelo Microsoft(R) Visual Studio.
+################################################################################
+
+/banco-inter-sdk/bin/.vs
+/banco-inter-sdk/banco-inter-sdk/obj/bin
+/banco-inter-sdk/banco-inter-sdk/obj
+
+/banco-inter-sdk/banco-inter-sdk/bin/Debug/net8.0
