@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35431.28
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SDK.Payments.BancoInter", "banco-inter-sdk\SDK.Payments.BancoInter.csproj", "{00A7D347-1355-43A4-9433-81A1E5A0F1FD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{00A7D347-1355-43A4-9433-81A1E5A0F1FD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{00A7D347-1355-43A4-9433-81A1E5A0F1FD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{00A7D347-1355-43A4-9433-81A1E5A0F1FD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{00A7D347-1355-43A4-9433-81A1E5A0F1FD}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {CB345A79-436F-406E-9FAB-69BE44ECCB18}
+	EndGlobalSection
+EndGlobal
