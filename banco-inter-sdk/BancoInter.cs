@@ -5,6 +5,8 @@ using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Polly;
 
+using SDK.Payments.DTOs;
+
 namespace SDK.Payments;
 
 /// <summary>
@@ -58,6 +60,9 @@ public class BancoInter
             new KeyValuePair<string, string>("scope", "boleto-cobranca.write boleto-cobranca.read")
         });
 
+        if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
+            content.Headers.Add("x-inter-conta-corrente", _config.ContaCorrente);
+
         _logger.LogDebug("Payload para obtenção do token: {Payload}", await content.ReadAsStringAsync());
 
         var response = await Policy
@@ -67,11 +72,14 @@ public class BancoInter
                     _logger.LogWarning("Retry {RetryCount} para ObterTokenAsync devido a: {Message}", retryCount, exception.Message))
             .ExecuteAsync(() => _httpClient.PostAsync("/oauth/v2/token", content));
 
+        if (!response.IsSuccessStatusCode)
+            throw new Exception($"Erro ao obter token de autenticação. Código: {response.StatusCode}");
+
         response.EnsureSuccessStatusCode();
         var jsonResponse = await response.Content.ReadAsStringAsync();
         var result = JsonConvert.DeserializeObject<dynamic>(jsonResponse);
 
-        if (result == null || string.IsNullOrWhiteSpace(result.access_token))
+        if (result == null || string.IsNullOrWhiteSpace((string)result.access_token))
             throw new Exception("Erro ao obter token de autenticação.");
 
         _authToken = result.access_token;
@@ -85,30 +93,43 @@ public class BancoInter
     /// </summary>
     public async Task<string> EmitirBoletoAsync(Payments.DTOs.RequisicaoEmitirCobranca cobranca)
     {
-        _logger.LogInformation("Iniciando a emissão do boleto.");
-
         if (string.IsNullOrWhiteSpace(cobranca.SeuNumero) || cobranca.ValorNominal <= 0 || string.IsNullOrWhiteSpace(cobranca.DataVencimento))
             throw new ArgumentException("Campos obrigatórios ausentes: 'SeuNumero', 'ValorNominal' e 'DataVencimento'.");
 
-        var jsonBody = JsonConvert.SerializeObject(cobranca);
-        _logger.LogDebug("Payload de emissão de boleto: {Payload}", jsonBody);
+        cobranca.FormasRecebimento = new List<string> { "PIX", "BOLETO" };
 
-        var response = await _httpClient.PostAsync("/cobranca/v3/cobrancas", new StringContent(jsonBody, Encoding.UTF8, "application/json"));
+        var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/cobranca/v3/cobrancas");
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+
+        if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
+            requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
+
+        var jsonBody = JsonConvert.SerializeObject(cobranca);
+        requestMessage.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+
+        var response = await Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(
+                retryCount: 5,
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                onRetry: (exception, timeSpan, retryCount, context) =>
+                {
+                    _logger.LogWarning($"Retry {retryCount} for EmitirBoletoAsync due to: {exception.Message}");
+                })
+            .ExecuteAsync(async () => await _httpClient.SendAsync(requestMessage));
 
         if (!response.IsSuccessStatusCode)
         {
             var erro = await response.Content.ReadAsStringAsync();
-            _logger.LogError("Erro ao emitir boleto. Código: {StatusCode}, Detalhe: {Erro}", response.StatusCode, erro);
             throw new Exception($"Erro ao emitir boleto. Código: {response.StatusCode}, Detalhe: {erro}");
         }
 
         var jsonResponse = await response.Content.ReadAsStringAsync();
+
+        if(string.IsNullOrWhiteSpace(jsonResponse))
+            throw new Exception("Erro ao emitir boleto. Resposta vazia.");
+
         var result = JsonConvert.DeserializeObject<dynamic>(jsonResponse);
-
-        if (result == null || string.IsNullOrWhiteSpace(result.codigoSolicitacao))
-            throw new Exception("Erro ao emitir boleto. Código de solicitação não retornado.");
-
-        _logger.LogInformation($"Boleto emitido com sucesso. Código de solicitação: {result.codigoSolicitacao}");
 
         return result.codigoSolicitacao;
     }
@@ -118,24 +139,38 @@ public class BancoInter
     /// </summary>
     public async Task<Payments.DTOs.ConsultaCobrancaResponse> ConsultarCobrancaAsync(string codigoSolicitacao)
     {
-        _logger.LogInformation("Consultando cobrança para o código {CodigoSolicitacao}.", codigoSolicitacao);
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/cobranca/v3/cobrancas/{codigoSolicitacao}");
+        if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
+            request.Headers.Add("x-conta-corrente", _config.ContaCorrente);
 
-        var response = await _httpClient.GetAsync($"/cobranca/v3/cobrancas/{codigoSolicitacao}");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+
+        var response = await Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(
+                retryCount: 5,
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                onRetry: (exception, timeSpan, retryCount, context) =>
+                {
+                    _logger.LogWarning($"Retry {retryCount} for ConsultarCobrancaAsync due to: {exception.Message}");
+                })
+            .ExecuteAsync(async () =>
+            {
+                return await _httpClient.SendAsync(request);
+            });
 
         if (!response.IsSuccessStatusCode)
         {
             var erro = await response.Content.ReadAsStringAsync();
-            _logger.LogError("Erro ao consultar cobrança. Código: {StatusCode}, Detalhe: {Erro}", response.StatusCode, erro);
             throw new Exception($"Erro ao consultar cobrança. Código: {response.StatusCode}, Detalhe: {erro}");
         }
 
         var jsonResponse = await response.Content.ReadAsStringAsync();
-        var consultaResponse = JsonConvert.DeserializeObject<Payments.DTOs.ConsultaCobrancaResponse>(jsonResponse);
 
-        if (consultaResponse == null)
-            throw new Exception("Erro ao deserializar a resposta da consulta de cobrança.");
+        if(string.IsNullOrWhiteSpace(jsonResponse))
+            throw new Exception("Erro ao consultar cobrança. Resposta vazia.");
 
-        _logger.LogInformation("Consulta de cobrança bem-sucedida para o código {CodigoSolicitacao}.", codigoSolicitacao);
+        var consultaResponse = JsonConvert.DeserializeObject<ConsultaCobrancaResponse>(jsonResponse);
 
         return consultaResponse;
     }
@@ -145,19 +180,30 @@ public class BancoInter
     /// </summary>
     public async Task<string> ObterPdfAsync(string codigoSolicitacao)
     {
-        _logger.LogInformation("Obtendo PDF para o código de cobrança {CodigoSolicitacao}.", codigoSolicitacao);
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/cobranca/v3/cobrancas/{codigoSolicitacao}/pdf");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
+            request.Headers.Add("x-conta-corrente", _config.ContaCorrente);
 
-        var response = await _httpClient.GetAsync($"/cobranca/v3/cobrancas/{codigoSolicitacao}/pdf");
+        var response = await Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(
+                retryCount: 5,
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                onRetry: (exception, timeSpan, retryCount, context) =>
+                {
+                    Console.WriteLine($"Retry {retryCount} for ObterPdfAsync due to: {exception.Message}");
+                })
+            .ExecuteAsync(async () =>
+            {
+                return await _httpClient.SendAsync(request);
+            });
 
         if (!response.IsSuccessStatusCode)
         {
             var erro = await response.Content.ReadAsStringAsync();
-            _logger.LogError("Erro ao obter PDF. Código: {StatusCode}, Detalhe: {Erro}", response.StatusCode, erro);
             throw new Exception($"Erro ao obter PDF. Código: {response.StatusCode}, Detalhe: {erro}");
         }
-
-        _logger.LogInformation("PDF obtido com sucesso para o código de cobrança {CodigoSolicitacao}.", codigoSolicitacao);
-
         return await response.Content.ReadAsStringAsync();
     }
 
@@ -166,21 +212,25 @@ public class BancoInter
     /// </summary>
     public async Task CancelarCobrancaAsync(string codigoSolicitacao, string motivo)
     {
-        _logger.LogInformation("Cancelando a cobrança {CodigoSolicitacao} com motivo: {Motivo}.", codigoSolicitacao, motivo);
+        var requestMessage = new HttpRequestMessage(HttpMethod.Patch, $"/cobranca/v3/cobrancas/{codigoSolicitacao}/cancelar");
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
+            requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
 
         var payload = new { motivoCancelamento = motivo };
         var jsonBody = JsonConvert.SerializeObject(payload);
+        requestMessage.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
 
-        var response = await _httpClient.PatchAsync($"/cobranca/v3/cobrancas/{codigoSolicitacao}/cancelar", new StringContent(jsonBody, Encoding.UTF8, "application/json"));
+        var response = await Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)))
+            .ExecuteAsync(async () => await _httpClient.SendAsync(requestMessage));
 
         if (!response.IsSuccessStatusCode)
         {
             var erro = await response.Content.ReadAsStringAsync();
-            _logger.LogError("Erro ao cancelar cobrança. Código: {StatusCode}, Detalhe: {Erro}", response.StatusCode, erro);
             throw new Exception($"Erro ao cancelar cobrança. Código: {response.StatusCode}, Detalhe: {erro}");
         }
-
-        _logger.LogInformation("Cobrança {CodigoSolicitacao} cancelada com sucesso.", codigoSolicitacao);
     }
 
     /// <summary>
@@ -188,20 +238,25 @@ public class BancoInter
     /// </summary>
     public async Task CriarWebhookAsync(string urlWebhook)
     {
-        _logger.LogInformation("Criando webhook para URL: {UrlWebhook}.", urlWebhook);
-
-        var payload = new { webhookUrl = urlWebhook };
-
-        var response = await _httpClient.PutAsync("/cobranca/v3/cobrancas/webhook", new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json"));
+        var requestMessage = new HttpRequestMessage(HttpMethod.Put, "/cobranca/v3/cobrancas/webhook");
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
+            requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
+        var payload = new {
+            webhookUrl = urlWebhook,
+        };
+        var jsonBody = JsonConvert.SerializeObject(payload);
+        requestMessage.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+        var response = await Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)))
+            .ExecuteAsync(async () => await _httpClient.SendAsync(requestMessage));
 
         if (!response.IsSuccessStatusCode)
         {
             var erro = await response.Content.ReadAsStringAsync();
-            _logger.LogError("Erro ao criar webhook. Código: {StatusCode}, Detalhe: {Erro}", response.StatusCode, erro);
             throw new Exception($"Erro ao criar webhook. Código: {response.StatusCode}, Detalhe: {erro}");
         }
-
-        _logger.LogInformation("Webhook criado com sucesso.");
     }
 
     /// <summary>
@@ -209,17 +264,17 @@ public class BancoInter
     /// </summary>
     public async Task ExcluirWebhookAsync()
     {
-        _logger.LogInformation("Excluindo webhook.");
-
-        var response = await _httpClient.DeleteAsync("/cobranca/v2/webhook");
-
-        if (!response.IsSuccessStatusCode)
-        {
+        var requestMessage = new HttpRequestMessage(HttpMethod.Delete, "/cobranca/v3/cobrancas/webhook");
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
+            requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
+        var response = await Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)))
+            .ExecuteAsync(async () => await _httpClient.SendAsync(requestMessage));
+        if (!response.IsSuccessStatusCode) {
             var erro = await response.Content.ReadAsStringAsync();
-            _logger.LogError("Erro ao excluir webhook. Código: {StatusCode}, Detalhe: {Erro}", response.StatusCode, erro);
             throw new Exception($"Erro ao excluir webhook. Código: {response.StatusCode}, Detalhe: {erro}");
         }
-
-        _logger.LogInformation("Webhook excluído com sucesso.");
     }
 }
