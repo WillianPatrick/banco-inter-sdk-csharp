@@ -6,5 +6,5 @@
 /banco-inter-sdk/bin
 /banco-inter-sdk/obj
 
-/.vs/banco-inter-sdk
-/.vs/SDK.Payments/v17
+/.vs
+/.vs/slnx.sqlite
