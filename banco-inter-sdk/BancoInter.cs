@@ -70,7 +70,7 @@ public class BancoInter
             .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
                 (exception, timeSpan, retryCount, context) =>
                     _logger.LogWarning("Retry {RetryCount} para ObterTokenAsync devido a: {Message}", retryCount, exception.Message))
-            .ExecuteAsync(() => _httpClient.PostAsync("/oauth/v2/token", content));
+            .ExecuteAsync(async () => await _httpClient.PostAsync("/oauth/v2/token", content));
 
         if (!response.IsSuccessStatusCode)
             throw new Exception($"Erro ao obter token de autenticação. Código: {response.StatusCode}");
@@ -154,10 +154,7 @@ public class BancoInter
                 {
                     _logger.LogWarning($"Retry {retryCount} for ConsultarCobrancaAsync due to: {exception.Message}");
                 })
-            .ExecuteAsync(async () =>
-            {
-                return await _httpClient.SendAsync(request);
-            });
+            .ExecuteAsync(async () => await _httpClient.SendAsync(request));
 
         if (!response.IsSuccessStatusCode)
         {
@@ -194,10 +191,7 @@ public class BancoInter
                 {
                     Console.WriteLine($"Retry {retryCount} for ObterPdfAsync due to: {exception.Message}");
                 })
-            .ExecuteAsync(async () =>
-            {
-                return await _httpClient.SendAsync(request);
-            });
+            .ExecuteAsync(async () => await _httpClient.SendAsync(request));
 
         if (!response.IsSuccessStatusCode)
         {
