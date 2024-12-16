@@ -6,6 +6,9 @@ using Newtonsoft.Json;
 using Polly;
 
 using SDK.Payments.DTOs;
+using SDK.Payments.Models;
+
+using static System.Formats.Asn1.AsnWriter;
 
 namespace SDK.Payments;
 
@@ -17,7 +20,7 @@ public class BancoInter
     private readonly HttpClient _httpClient;
     private readonly Config _config;
     private readonly ILogger _logger;
-    private string _authToken;
+    private List<Jwt> _authTokens;
 
     /// <summary>
     /// Construtor para inicializar a instância do SDK do Banco Inter.
@@ -41,23 +44,31 @@ public class BancoInter
         };
 
         _logger.LogDebug("Configurando HttpClient com base URL: {BaseUrl}", _httpClient.BaseAddress);
-
-        _authToken = ObterTokenAsync().Result;
     }
 
     /// <summary>
     /// Obtém o token de autenticação.
     /// </summary>
-    public async Task<string> ObterTokenAsync()
+    public async Task<string> ObterTokenAsync(string[] scopes)
     {
         _logger.LogInformation("Iniciando a obtenção do token de autenticação.");
+
+        if (_authTokens != null)
+        {
+            var existingToken = _authTokens.FirstOrDefault(t => t.ExpiresOn > DateTime.UtcNow && t.Scopes.Intersect(scopes).Any());
+            if (existingToken != null)
+            {
+                _logger.LogInformation("Token de autenticação obtido com sucesso.");
+                return existingToken.Token;
+            }
+        }
 
         var content = new FormUrlEncodedContent(new[]
         {
             new KeyValuePair<string, string>("client_id", _config.ClientId),
             new KeyValuePair<string, string>("client_secret", _config.ClientSecret),
             new KeyValuePair<string, string>("grant_type", "client_credentials"),
-            new KeyValuePair<string, string>("scope", "boleto-cobranca.write boleto-cobranca.read")
+            new KeyValuePair<string, string>("scope", scopes != null ? string.Join(" ", scopes) : "boleto-cobranca.write boleto-cobranca.read"),
         });
 
         if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
@@ -67,7 +78,7 @@ public class BancoInter
 
         var response = await Policy
             .Handle<Exception>()
-            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(1, retryAttempt)),
                 (exception, timeSpan, retryCount, context) =>
                     _logger.LogWarning("Retry {RetryCount} para ObterTokenAsync devido a: {Message}", retryCount, exception.Message))
             .ExecuteAsync(async () => await _httpClient.PostAsync("/oauth/v2/token", content));
@@ -82,10 +93,18 @@ public class BancoInter
         if (result == null || string.IsNullOrWhiteSpace((string)result.access_token))
             throw new Exception("Erro ao obter token de autenticação.");
 
-        _authToken = result.access_token;
+
+        _authTokens = _authTokens ?? new List<Jwt>();
+
+        _authTokens.Add(new Jwt
+        {
+            Token = result.access_token,
+            ExpiresOn = DateTime.UtcNow.AddSeconds((int)result.expires_in),
+            Scopes = scopes
+        });
 
         _logger.LogInformation("Token de autenticação obtido com sucesso.");
-        return _authToken;
+        return result.access_token;
     }
 
     /// <summary>
@@ -99,7 +118,7 @@ public class BancoInter
         cobranca.FormasRecebimento = new List<string> { "PIX", "BOLETO" };
 
         var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/cobranca/v3/cobrancas");
-        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await ObterTokenAsync(new[] { "boleto-cobranca.write" }));
 
         if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
             requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
@@ -111,7 +130,7 @@ public class BancoInter
             .Handle<Exception>()
             .WaitAndRetryAsync(
                 retryCount: 5,
-                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(1, retryAttempt)),
                 onRetry: (exception, timeSpan, retryCount, context) =>
                 {
                     _logger.LogWarning($"Retry {retryCount} for EmitirBoletoAsync due to: {exception.Message}");
@@ -143,13 +162,13 @@ public class BancoInter
         if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
             request.Headers.Add("x-conta-corrente", _config.ContaCorrente);
 
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await ObterTokenAsync(new[] { "boleto-cobranca.read" }));
 
         var response = await Policy
             .Handle<Exception>()
             .WaitAndRetryAsync(
                 retryCount: 5,
-                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(1, retryAttempt)),
                 onRetry: (exception, timeSpan, retryCount, context) =>
                 {
                     _logger.LogWarning($"Retry {retryCount} for ConsultarCobrancaAsync due to: {exception.Message}");
@@ -178,7 +197,7 @@ public class BancoInter
     public async Task<string> ObterPdfAsync(string codigoSolicitacao)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"/cobranca/v3/cobrancas/{codigoSolicitacao}/pdf");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await ObterTokenAsync(new[] { "boleto-cobranca.read" }));
         if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
             request.Headers.Add("x-conta-corrente", _config.ContaCorrente);
 
@@ -186,7 +205,7 @@ public class BancoInter
             .Handle<Exception>()
             .WaitAndRetryAsync(
                 retryCount: 5,
-                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(1, retryAttempt)),
                 onRetry: (exception, timeSpan, retryCount, context) =>
                 {
                     Console.WriteLine($"Retry {retryCount} for ObterPdfAsync due to: {exception.Message}");
@@ -207,7 +226,7 @@ public class BancoInter
     public async Task CancelarCobrancaAsync(string codigoSolicitacao, string motivo)
     {
         var requestMessage = new HttpRequestMessage(HttpMethod.Patch, $"/cobranca/v3/cobrancas/{codigoSolicitacao}/cancelar");
-        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await ObterTokenAsync(new[] { "boleto-cobranca.write" }));
         if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
             requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
 
@@ -217,7 +236,10 @@ public class BancoInter
 
         var response = await Policy
             .Handle<Exception>()
-            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)))
+            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(1, retryAttempt)), onRetry: (exception, timeSpan, retryCount, context) =>
+            {
+                _logger.LogWarning($"Retry {retryCount} for CancelarCobrancaAsync due to: {exception.Message}");
+            })
             .ExecuteAsync(async () => await _httpClient.SendAsync(requestMessage));
 
         if (!response.IsSuccessStatusCode)
@@ -233,17 +255,22 @@ public class BancoInter
     public async Task CriarWebhookAsync(string urlWebhook)
     {
         var requestMessage = new HttpRequestMessage(HttpMethod.Put, "/cobranca/v3/cobrancas/webhook");
-        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await ObterTokenAsync(new[] { "boleto-cobranca.write" }));
         if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
             requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
-        var payload = new {
+
+        requestMessage.Content = new StringContent(JsonConvert.SerializeObject(new
+        {
             webhookUrl = urlWebhook,
-        };
-        var jsonBody = JsonConvert.SerializeObject(payload);
-        requestMessage.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+        }), Encoding.UTF8, "application/json");
+
         var response = await Policy
             .Handle<Exception>()
-            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)))
+            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)), onRetry: (exception, timeSpan, retryCount, context) =>
+            {
+                _logger.LogWarning($"Retry {retryCount} for CriarWebhookAsync due to: {exception.Message}");
+            })
             .ExecuteAsync(async () => await _httpClient.SendAsync(requestMessage));
 
         if (!response.IsSuccessStatusCode)
@@ -251,6 +278,8 @@ public class BancoInter
             var erro = await response.Content.ReadAsStringAsync();
             throw new Exception($"Erro ao criar webhook. Código: {response.StatusCode}, Detalhe: {erro}");
         }
+
+        _logger.LogInformation("Webhook created successfully with URL: {Webhook_URL}", _config.WebhookUrl);
     }
 
     /// <summary>
@@ -259,12 +288,15 @@ public class BancoInter
     public async Task ExcluirWebhookAsync()
     {
         var requestMessage = new HttpRequestMessage(HttpMethod.Delete, "/cobranca/v3/cobrancas/webhook");
-        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await ObterTokenAsync(new[] { "boleto-cobranca.write" }));
         if (!string.IsNullOrWhiteSpace((string)_config.ContaCorrente))
             requestMessage.Headers.Add("x-conta-corrente", _config.ContaCorrente);
         var response = await Policy
             .Handle<Exception>()
-            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)))
+            .WaitAndRetryAsync(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(1, retryAttempt)), onRetry: (exception, timeSpan, retryCount, context) =>
+            {
+                _logger.LogWarning($"Retry {retryCount} for ExcluirWebhookAsync due to: {exception.Message}");
+            })
             .ExecuteAsync(async () => await _httpClient.SendAsync(requestMessage));
         if (!response.IsSuccessStatusCode) {
             var erro = await response.Content.ReadAsStringAsync();
